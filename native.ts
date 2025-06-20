@@ -90,7 +90,7 @@ export function connectSocket(serverUrl: string): void {
             id: data.id,
             albumName: data.album,
             buttons: [],
-            image: "https://maple.kolf.pro:3000/public/get/albumArt/" + data.id + "/" + uuidv4()
+            image: "https://api.maple.music/public/get/albumArt/" + data.id + "/" + uuidv4()
         };
         console.log("[MapleRPC] Received RPC update:", JSON.stringify(newData, null, 2));
 

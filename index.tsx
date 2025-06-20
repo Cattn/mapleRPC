@@ -89,7 +89,7 @@ const settings = definePluginSettings({
     serverUrl: {
         type: OptionType.STRING,
         description: "Maple Server URL",
-        default: "https://maple.kolf.pro:3000",
+        default: "https://api.maple.music",
         restartNeeded: true
     },
     username: {
