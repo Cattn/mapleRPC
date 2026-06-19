@@ -26,9 +26,33 @@ export interface MapleRPCData {
 let socket: ReturnType<typeof io> | null = null;
 let currentData: MapleRPCData | null = null;
 
+async function ensureConnectSrcAllowed(serverUrl: string): Promise<boolean> {
+    try {
+        const { origin } = new URL(serverUrl);
+
+        if (await VencordNative.csp.isDomainAllowed(origin, ["connect-src"])) {
+            return true;
+        }
+
+        const result = await VencordNative.csp.requestAddOverride(origin, ["connect-src"], "MapleRPC");
+        if (result === "ok") {
+            console.warn("[MapleRPC] Added CSP override for Maple, please restart Discord/Vesktop to apply it.");
+        }
+
+        return false;
+    } catch (error) {
+        console.error("[MapleRPC] Failed to verify Maple server CSP:", error);
+        return false;
+    }
+}
+
 export async function login(serverUrl: string, username: string, password: string): Promise<boolean> {
     try {
         console.log("[MapleRPC] Attempting to login...");
+        if (!await ensureConnectSrcAllowed(serverUrl)) {
+            return false;
+        }
+
         const response = await fetch(`${serverUrl}/login`, {
             method: "POST",
             headers: {
@@ -64,7 +88,9 @@ export function connectSocket(serverUrl: string): void {
     console.log("[MapleRPC] Attempting to connect to socket at:", serverUrl);
 
     socket = io(serverUrl, {
-        withCredentials: true
+        withCredentials: true,
+        transports: ["polling"],
+        upgrade: false
     });
 
     socket.on("connect", () => {

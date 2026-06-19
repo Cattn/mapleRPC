@@ -61,7 +61,7 @@ const enum ActivityFlag {
 
 // Use YOUR MapleRPC application ID
 const applicationId = "1360456499263963156";
-const MAPLE_URL = "https://maple.kolf.pro/";
+const MAPLE_URL = "https://maple.music/";
 
 function setActivity(activity: Activity | null) {
     FluxDispatcher.dispatch({
