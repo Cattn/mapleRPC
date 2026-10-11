@@ -33,6 +33,11 @@ let renderRevision = 0;
 let connection: MapleConnection | undefined;
 let loginController: AbortController | undefined;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+let artworkRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let artworkFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+let artworkDeadline = 0;
+let artworkTrack: string | undefined;
+let defaultArtwork: Promise<string | undefined> | undefined;
 let currentPlayback: Playback | null = null;
 let artwork: { key: string; url: string; asset?: Promise<string | undefined>; } | undefined;
 let status = "Disconnected.";
@@ -50,6 +55,10 @@ function setActivity(activity: Activity | null): void {
 function clearPlayback(): void {
     ++renderRevision;
     clearTimeout(expiryTimer);
+    clearTimeout(artworkRetryTimer);
+    clearTimeout(artworkFallbackTimer);
+    artworkTrack = undefined;
+    artworkDeadline = 0;
     currentPlayback = null;
     artwork = undefined;
     setActivity(null);
@@ -214,6 +223,8 @@ async function updatePresence(): Promise<void> {
     const revision = ++renderRevision;
     const playback = currentPlayback;
     clearTimeout(expiryTimer);
+    clearTimeout(artworkRetryTimer);
+    clearTimeout(artworkFallbackTimer);
     if (!running || !playback) return;
     const staleMs = Math.max(1, Math.min(30, settings.store.staleTimeout || 10)) * 60000;
     const expiresAt = playbackExpiry(playback, staleMs);
@@ -243,23 +254,61 @@ async function updatePresence(): Promise<void> {
         activity.buttons = buttons.map(button => button.label);
         activity.metadata = { button_urls: buttons.map(button => button.url) };
     }
-    setActivity(activity);
-    if (!playback.id) return;
-    const key = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album]);
+    const track = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album]);
+    const deadline = Date.now() + playback.artworkWait * 1000;
+    artworkDeadline = artworkTrack === track ? Math.min(artworkDeadline, deadline) : deadline;
+    artworkTrack = track;
+    const key = JSON.stringify([settings.store.serverUrl, playback.id, playback.artworkId]);
     if (artwork?.key !== key) {
+        setActivity(null);
         artwork = {
             key,
-            url: `${normalizeServerUrl(settings.store.serverUrl)}/public/get/albumArt/${encodeURIComponent(playback.id)}/${crypto.randomUUID()}`
+            url: playback.id && playback.artworkId
+                ? `${normalizeServerUrl(settings.store.serverUrl)}/public/get/albumArt/${encodeURIComponent(playback.id)}/${playback.artworkId}`
+                : ""
         };
     }
-    const imageUrl = artwork.url;
-    artwork.asset ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, [imageUrl]))
+    const cover = artwork;
+    let hasAlbumArtwork = false;
+    const isCurrent = () => running && revision === renderRevision && currentPlayback === playback && Date.now() < expiresAt;
+    const showFallback = () => {
+        if (!isCurrent() || hasAlbumArtwork) return;
+        setActivity(activity);
+        setStatus("Connected. Artwork unavailable; showing playback.");
+        defaultArtwork ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, ["maple"]))
+            .then(ids => ids[0] as string | undefined).catch(() => undefined);
+        void defaultArtwork.then(asset => {
+            if (!asset || !isCurrent() || hasAlbumArtwork) return;
+            activity.assets = { large_image: asset, large_text: playback.album || playback.title };
+            setActivity(activity);
+        });
+    };
+    if (Date.now() >= artworkDeadline) showFallback();
+    else artworkFallbackTimer = setTimeout(showFallback, artworkDeadline - Date.now());
+    // Unconfirmed artwork may still point to the previous album on the server.
+    if (!playback.id || !playback.artworkId) return;
+    // A fresh query retries a failed Discord proxy lookup without caching the failure.
+    const imageUrl = `${cover.url}?request=${crypto.randomUUID()}`;
+    cover.asset ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, [imageUrl]))
         .then(ids => ids[0] as string | undefined)
-        .catch(() => undefined);
-    const asset = await artwork.asset;
-    if (!running || revision !== renderRevision || currentPlayback !== playback || Date.now() >= expiresAt) return;
-    if (asset) activity.assets = { large_image: asset, large_text: playback.album || playback.title };
+        .catch(() => undefined)
+        .then(asset => {
+            if (!asset) cover.asset = undefined;
+            return asset;
+        });
+    const asset = await cover.asset;
+    if (!isCurrent()) return;
+    if (!asset) {
+        if (Date.now() >= artworkDeadline) showFallback();
+        else setStatus("Connected. Waiting for album artwork.");
+        artworkRetryTimer = setTimeout(() => { void updatePresence(); }, 5000);
+        return;
+    }
+    hasAlbumArtwork = true;
+    clearTimeout(artworkFallbackTimer);
+    activity.assets = { large_image: asset, large_text: playback.album || playback.title };
     setActivity(activity);
+    setStatus("Connected. Receiving playback.");
 }
 
 export default definePlugin({

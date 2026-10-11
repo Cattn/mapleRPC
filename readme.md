@@ -8,7 +8,7 @@ Show Maple playback as a Discord listening activity in Vencord or Equicord. The 
 2. Build your mod normally (`pnpm build`), then restart Discord.
 3. Enable MapleRPC. Save the Maple API URL if you use a custom HTTPS server.
 4. Open MapleRPC settings and sign in with your Maple username and password. If Discord asks to allow the API connection, allow it and restart Discord before signing in again.
-5. Enable Discord integration in Maple and start a track. Existing Maple servers only publish an RPC update when a track starts; the plugin cannot recover an already-playing track when first connecting.
+5. Enable Discord integration in Maple and start a track. Updated Maple servers support upload-confirmed artwork IDs; older servers use the fallback described below.
 
 No additional npm packages or changes to the mod's `package.json` or lockfile are needed. `crypto.randomUUID()` replaces `uuid`, and a small renderer-side Engine.IO v4 / Socket.IO JSON polling client replaces `socket.io-client`. Only Maple's default namespace is supported; this is not a general Socket.IO client.
 
@@ -26,26 +26,22 @@ API URLs must use HTTPS and cannot contain embedded credentials, query parameter
 
 Connection failures and missed server heartbeats clear presence. Reconnection backs off to 30 seconds. Stop, disconnect, pause/stop events, and expiry invalidate pending artwork requests so they cannot restore an obsolete activity.
 
-## Playback accuracy and existing Maple servers
+## Artwork and playback
 
-Analysis used the `Maple-too` clone. Its `src/lib/player.ts` sends `nowPlaying` at track start. `api/iomanager/io.js` forwards track metadata as `rpcUpdate`, but drops playback timing. `api/maple.js` only logs a listener disconnect; it does not clear other RPC clients. The plugin remaining connected is therefore not proof that the listening browser is still playing.
+MapleRPC waits up to **30 seconds total** for a successful cover upload and Discord image resolution. If artwork is missing, rejected, slow, or unavailable, the current song still appears after that deadline, using Maple's default cover when it resolves. A failed default image lookup still allows the listening activity to display. The previous song clears when the next track starts preparing its cover.
 
-With this existing protocol, the plugin shows metadata without inventing a playback start time. Presence expires after **10 minutes without a playback update** by default. The timeout is adjustable from 1–30 minutes. This bounds stale presence after a listening browser closes, but also clears unusually long tracks that send no fresh update. Pausing or seeking cannot be detected immediately with the current server.
+The companion changes in `Maple-too` return an `artworkId` (a SHA-256 content hash) and forward it in playback reports, together with the remaining artwork wait. Upload and image lookup share one deadline; heartbeats do not restart it. Deploy the updated Maple API and web client together, reload Maple tabs, and rebuild your mod. Older servers without artwork confirmation can still publish playback using the 30-second fallback.
 
-For accurate progress and immediate pause/stop handling, Maple must extend `rpcUpdate` as described in [the playback contract](docs/playback-contract.md). The plugin already accepts those fields, recalculates timestamps on seeks, accounts for playback rate, and expires at track end when position and duration are available.
+Artwork URLs are tied to the uploaded bytes. If another upload replaces the account's cover, an old URL returns 404 instead of the wrong album. Failed Discord image lookups retry every five seconds, including after fallback; a late successful lookup replaces the default cover. Successful artwork is reused for progress updates; a changed artwork ID refreshes the cover even when song metadata stays the same.
+
+Maple's playback position, duration, and playback rate determine timestamps. Pause/stop updates clear presence immediately, and presence expires at track end or after the configured timeout without fresh updates. Pending artwork requests cannot restore a paused, disconnected, or superseded track.
 
 ## Development checks
 
-With Node 24 or later, run the transport and playback tests without installing packages:
+Run the artwork lifecycle tests using an existing Vencord or Equicord checkout with its normal build dependencies installed:
 
 ```sh
-node --experimental-transform-types --test --test-isolation=none tests/*.test.mjs
+VENCORD_DIR=/path/to/Vencord node --test --test-isolation=none tests/artwork.test.mjs
 ```
 
-For all tests, including plugin lifecycle checks, point to an existing Vencord or Equicord checkout with its normal build dependencies installed:
-
-```sh
-VENCORD_DIR=/path/to/Vencord node --experimental-transform-types --test --test-isolation=none tests/*.test.mjs
-```
-
-The lifecycle fixture uses that checkout's existing `esbuild`; it does not modify the checkout. Real Discord rendering, CSP permission prompts, and live Maple authentication still need a manual smoke test.
+The fixture uses the checkout's existing `esbuild` and does not modify that checkout. Live Discord artwork rendering and Maple authentication still need a manual smoke test.
