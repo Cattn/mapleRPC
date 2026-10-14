@@ -10,7 +10,7 @@ Discord's member list shows the current song title beside the listening icon. Th
 2. Build your mod normally (`pnpm build`), then restart Discord.
 3. Enable MapleRPC. Save the Maple API URL if you use a custom HTTPS server.
 4. Open MapleRPC settings and sign in with your Maple username and password. If Discord asks to allow the API connection, allow it and restart Discord before signing in again.
-5. Enable Discord integration in Maple and start a track. Updated Maple servers support upload-confirmed artwork IDs; older servers use the fallback described below.
+5. Enable Discord integration in Maple and start a track. Updated Maple servers notify MapleRPC when artwork finishes uploading; older servers use the existing random artwork URL.
 
 No additional npm packages or changes to the mod's `package.json` or lockfile are needed. `crypto.randomUUID()` replaces `uuid`, and a small renderer-side Engine.IO v4 / Socket.IO JSON polling client replaces `socket.io-client`. Only Maple's default namespace is supported; this is not a general Socket.IO client.
 
@@ -32,9 +32,9 @@ Connection failures and missed server heartbeats clear presence. Reconnection ba
 
 MapleRPC waits up to **30 seconds total** for a successful cover upload and Discord image resolution. If artwork is missing, rejected, slow, or unavailable, the current song still appears after that deadline, using Maple's default cover when it resolves. A failed default image lookup still allows the listening activity to display. The previous song clears when the next track starts preparing its cover.
 
-The companion changes in `Maple-too` return an `artworkId` (a SHA-256 content hash) and forward it in playback reports, together with the remaining artwork wait. Upload and image lookup share one deadline; heartbeats do not restart it. Deploy the updated Maple API and web client together, reload Maple tabs, and rebuild your mod. Older servers without artwork confirmation can still publish playback using the 30-second fallback.
+The companion changes in `Maple-too` emit `albumArtUploaded` over the authenticated socket after saving a cover. MapleRPC then resolves the image and updates the activity. Playback reports also include upload readiness so reconnecting clients recover without needing to receive the original event. Upload and image lookup share one deadline; heartbeats do not restart it. Deploy the updated Maple API and web client together, reload Maple tabs, and rebuild your mod.
 
-Artwork URLs are tied to the uploaded bytes. If another upload replaces the account's cover, an old URL returns 404 instead of the wrong album. Failed Discord image lookups retry every five seconds, including after fallback; a late successful lookup replaces the default cover. Successful artwork is reused for progress updates; a changed artwork ID refreshes the cover even when song metadata stays the same.
+Artwork uses the backward-compatible `/public/get/albumArt/{userId}/{random}` endpoint; no SHA hash is required. An optional per-track upload request token matches notifications to playback, preventing late notifications from confirming a different track. The token is not part of the image URL. Updated clients wait for upload completion; clients/servers without readiness fields use a best-effort lookup of the account's current image, which can still be the previous cover until a new upload finishes. Failed Discord image lookups retry every five seconds, including after fallback; a late successful lookup replaces the default cover. Successful artwork is reused for progress updates, and new tracks or upload notifications refresh the cover.
 
 Maple's playback position, duration, and playback rate determine timestamps. Pause/stop updates clear presence immediately, and presence expires at track end or after the configured timeout without fresh updates. Pending artwork requests cannot restore a paused, disconnected, or superseded track.
 
@@ -46,4 +46,10 @@ Run the artwork lifecycle tests using an existing Vencord or Equicord checkout w
 VENCORD_DIR=/path/to/Vencord node --test --test-isolation=none tests/artwork.test.mjs
 ```
 
-The fixture uses the checkout's existing `esbuild` and does not modify that checkout. Live Discord artwork rendering and Maple authentication still need a manual smoke test.
+The companion API/client checks also use a local Maple-too checkout:
+
+```sh
+MAPLE_DIR=/path/to/Maple-too VENCORD_DIR=/path/to/Vencord node --test --test-isolation=none tests/*.test.mjs
+```
+
+The fixtures use the checkout's existing `esbuild` and do not modify either checkout. Live Discord artwork rendering and Maple authentication still need a manual smoke test.

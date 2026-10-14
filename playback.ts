@@ -11,7 +11,8 @@ export interface Playback {
     artist?: string;
     album?: string;
     id?: string;
-    artworkId?: string;
+    artworkRequestId?: string;
+    artworkReady?: boolean;
     artworkWait: number;
     position?: number;
     duration?: number;
@@ -46,7 +47,6 @@ export function parsePlayback(value: unknown, now = Date.now()): Playback | null
     if (data.playing === false || data.paused === true || data.state === "paused" || data.state === "stopped" || data.state === "ended") return null;
     const title = text(data.title);
     if (!title) return null;
-    // Maple returns this content hash only after storing the client's cover.
     const position = seconds(data.position);
     const duration = seconds(data.duration);
     if (duration !== undefined && (duration === 0 || (position !== undefined && position >= duration))) return null;
@@ -67,7 +67,8 @@ export function parsePlayback(value: unknown, now = Date.now()): Playback | null
         artist: text(data.artist),
         album: text(data.album),
         id: typeof data.id === "string" && /^[\w-]{1,256}$/.test(data.id) ? data.id : undefined,
-        artworkId: typeof data.artworkId === "string" && /^[a-f0-9]{64}$/.test(data.artworkId) ? data.artworkId : undefined,
+        artworkRequestId: typeof data.artworkRequestId === "string" && /^[\w-]{1,128}$/.test(data.artworkRequestId) ? data.artworkRequestId : undefined,
+        artworkReady: typeof data.artworkReady === "boolean" ? data.artworkReady : undefined,
         artworkWait: typeof data.artworkWait === "number" && Number.isFinite(data.artworkWait) ? Math.max(0, Math.min(30, data.artworkWait)) : 30,
         position,
         duration,

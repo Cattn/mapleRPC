@@ -40,7 +40,7 @@ let artworkDeadline = 0;
 let artworkTrack: string | undefined;
 let defaultArtwork: Promise<string | undefined> | undefined;
 let currentPlayback: Playback | null = null;
-let artwork: { key: string; url: string; asset?: Promise<string | undefined>; } | undefined;
+let artwork: { key: string; url: string; assetId?: string; asset?: Promise<string | undefined>; } | undefined;
 let status = "Disconnected.";
 const statusListeners = new Set<(status: string) => void>();
 
@@ -118,6 +118,16 @@ async function connect(password?: string, username?: string): Promise<void> {
                 }
                 currentPlayback = playback;
                 setStatus("Connected. Receiving playback.");
+                void updatePresence();
+            },
+            onArtwork(value) {
+                if (!running || generation !== attempt || !currentPlayback || !value || typeof value !== "object") return;
+                const event = value as { id?: unknown; artworkRequestId?: unknown; };
+                if (event.id !== currentPlayback.id || event.artworkRequestId !== currentPlayback.artworkRequestId) return;
+                if (currentPlayback.artworkRequestId && currentPlayback.artworkReady) return;
+                currentPlayback = { ...currentPlayback, artworkReady: true };
+                // Legacy upload notifications refresh an already-resolved per-account image.
+                if (!currentPlayback.artworkRequestId) artwork = undefined;
                 void updatePresence();
             },
             onDisconnect() {
@@ -257,46 +267,57 @@ async function updatePresence(): Promise<void> {
         activity.buttons = buttons.map(button => button.label);
         activity.metadata = { button_urls: buttons.map(button => button.url) };
     }
-    const track = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album]);
+    const track = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album, playback.artworkRequestId]);
     const deadline = Date.now() + playback.artworkWait * 1000;
     artworkDeadline = artworkTrack === track ? Math.min(artworkDeadline, deadline) : deadline;
     artworkTrack = track;
-    const key = JSON.stringify([settings.store.serverUrl, playback.id, playback.artworkId]);
+    const key = track;
     if (artwork?.key !== key) {
         setActivity(null);
         artwork = {
             key,
-            url: playback.id && playback.artworkId
-                ? `${normalizeServerUrl(settings.store.serverUrl)}/public/get/albumArt/${encodeURIComponent(playback.id)}/${playback.artworkId}`
+            url: playback.id
+                ? `${normalizeServerUrl(settings.store.serverUrl)}/public/get/albumArt/${encodeURIComponent(playback.id)}`
                 : ""
         };
     }
     const cover = artwork;
-    let hasAlbumArtwork = false;
     const isCurrent = () => running && revision === renderRevision && currentPlayback === playback && Date.now() < expiresAt;
+    const showArtwork = (asset: string) => {
+        clearTimeout(artworkFallbackTimer);
+        activity.assets = { large_image: asset, large_text: playback.album || playback.title };
+        setActivity(activity);
+        setStatus("Connected. Receiving playback.");
+    };
+    // Progress/settings updates must reuse a resolved cover before considering fallback.
+    if (cover.assetId) {
+        showArtwork(cover.assetId);
+        return;
+    }
     const showFallback = () => {
-        if (!isCurrent() || hasAlbumArtwork) return;
+        if (!isCurrent() || cover.assetId) return;
         setActivity(activity);
         setStatus("Connected. Artwork unavailable; showing playback.");
         defaultArtwork ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, ["maple"]))
             .then(ids => ids[0] as string | undefined).catch(() => undefined);
         void defaultArtwork.then(asset => {
-            if (!asset || !isCurrent() || hasAlbumArtwork) return;
+            if (!asset || !isCurrent() || cover.assetId) return;
             activity.assets = { large_image: asset, large_text: playback.album || playback.title };
             setActivity(activity);
         });
     };
     if (Date.now() >= artworkDeadline) showFallback();
     else artworkFallbackTimer = setTimeout(showFallback, artworkDeadline - Date.now());
-    // Unconfirmed artwork may still point to the previous album on the server.
-    if (!playback.id || !playback.artworkId) return;
-    // A fresh query retries a failed Discord proxy lookup without caching the failure.
-    const imageUrl = `${cover.url}?request=${crypto.randomUUID()}`;
+    // Updated clients explicitly wait for upload completion; legacy clients omit this flag.
+    if (!playback.id || playback.artworkReady === false) return;
+    // Keep the legacy random path segment and retry without caching failed lookups.
+    const imageUrl = `${cover.url}/${crypto.randomUUID()}`;
     cover.asset ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, [imageUrl]))
         .then(ids => ids[0] as string | undefined)
         .catch(() => undefined)
         .then(asset => {
-            if (!asset) cover.asset = undefined;
+            if (asset) cover.assetId = asset;
+            else cover.asset = undefined;
             return asset;
         });
     const asset = await cover.asset;
@@ -307,11 +328,7 @@ async function updatePresence(): Promise<void> {
         artworkRetryTimer = setTimeout(() => { void updatePresence(); }, 5000);
         return;
     }
-    hasAlbumArtwork = true;
-    clearTimeout(artworkFallbackTimer);
-    activity.assets = { large_image: asset, large_text: playback.album || playback.title };
-    setActivity(activity);
-    setStatus("Connected. Receiving playback.");
+    showArtwork(asset);
 }
 
 export default definePlugin({

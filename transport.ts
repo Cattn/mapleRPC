@@ -75,6 +75,7 @@ class AuthenticationError extends Error { }
 
 interface Callbacks {
     onUpdate(data: unknown): void;
+    onArtwork(data: unknown): void;
     onDisconnect(): void;
     onStatus(status: string): void;
 }
@@ -176,6 +177,7 @@ export class MapleConnection {
                     const event: unknown = JSON.parse(match[1]);
                     if (!Array.isArray(event) || typeof event[0] !== "string") throw new Error("Invalid Socket.IO event.");
                     if (event[0] === "rpcUpdate") this.callbacks.onUpdate(event[1]);
+                    else if (event[0] === "albumArtUploaded") this.callbacks.onArtwork(event[1]);
                 } else if (packet !== "6" && !packet.startsWith("4")) {
                     throw new Error("Unsupported Engine.IO packet.");
                 }
