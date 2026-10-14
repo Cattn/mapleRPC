@@ -18,6 +18,7 @@ interface Activity {
     application_id: string;
     name: string;
     type: number;
+    status_display_type: number;
     flags: number;
     details: string;
     state?: string;
@@ -244,6 +245,8 @@ async function updatePresence(): Promise<void> {
         application_id: applicationId,
         name: "Maple",
         type: 2,
+        // Show the song title from details in Discord's member list.
+        status_display_type: 2,
         flags: 1,
         details: playback.title,
         state: playback.artist,

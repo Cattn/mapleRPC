@@ -2,6 +2,8 @@
 
 Show Maple playback as a Discord listening activity in Vencord or Equicord. The official Maple app is [play.maple.music](https://play.maple.music/).
 
+Discord's member list shows the current song title beside the listening icon. The expanded activity keeps Maple as the app name and shows the song and artist.
+
 ## Installation
 
 1. Clone this repository into your mod's `src/userplugins/mapleRPC` directory.
