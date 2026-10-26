@@ -10,10 +10,9 @@ export interface Playback {
     title: string;
     artist?: string;
     album?: string;
-    id?: string;
-    artworkRequestId?: string;
-    artworkReady?: boolean;
-    artworkWait: number;
+    id: string;
+    largeImageKey: string;
+    largeImageText?: string;
     position?: number;
     duration?: number;
     playbackRate: number;
@@ -30,6 +29,15 @@ function seconds(value: unknown): number | undefined {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 86400 ? value : undefined;
 }
 
+function artworkKey(value: unknown): string | undefined {
+    if (value === "maple") return value;
+    if (typeof value !== "string" || value.length > 2048) return;
+    try {
+        const url = new URL(value);
+        if (url.protocol === "https:" && !url.username && !url.password) return url.href;
+    } catch { return; }
+}
+
 export function safeButtonUrl(value: unknown): string | undefined {
     if (typeof value !== "string" || value.length > 2048) return;
     try {
@@ -44,12 +52,16 @@ export function safeButtonUrl(value: unknown): string | undefined {
 export function parsePlayback(value: unknown, now = Date.now()): Playback | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const data = value as Record<string, unknown>;
-    if (data.playing === false || data.paused === true || data.state === "paused" || data.state === "stopped" || data.state === "ended") return null;
+    if (data.playing !== true) return null;
     const title = text(data.title);
-    if (!title) return null;
+    const id = typeof data.id === "string" && /^[\w-]{1,256}$/.test(data.id) ? data.id : undefined;
+    const largeImageKey = artworkKey(data.largeImageKey);
     const position = seconds(data.position);
     const duration = seconds(data.duration);
-    if (duration !== undefined && (duration === 0 || (position !== undefined && position >= duration))) return null;
+    const { playbackRate } = data;
+    if (!title || !id || !largeImageKey) return null;
+    if (data.duration !== null && (duration === undefined || duration === 0 || (position !== undefined && position >= duration))) return null;
+    if (typeof playbackRate !== "number" || !Number.isFinite(playbackRate) || playbackRate <= 0 || playbackRate > 16) return null;
     const buttons: Playback["buttons"] = [];
     if (Array.isArray(data.buttons)) {
         for (const item of data.buttons.slice(0, 10)) {
@@ -66,13 +78,12 @@ export function parsePlayback(value: unknown, now = Date.now()): Playback | null
         title,
         artist: text(data.artist),
         album: text(data.album),
-        id: typeof data.id === "string" && /^[\w-]{1,256}$/.test(data.id) ? data.id : undefined,
-        artworkRequestId: typeof data.artworkRequestId === "string" && /^[\w-]{1,128}$/.test(data.artworkRequestId) ? data.artworkRequestId : undefined,
-        artworkReady: typeof data.artworkReady === "boolean" ? data.artworkReady : undefined,
-        artworkWait: typeof data.artworkWait === "number" && Number.isFinite(data.artworkWait) ? Math.max(0, Math.min(30, data.artworkWait)) : 30,
+        id,
+        largeImageKey,
+        largeImageText: text(data.largeImageText),
         position,
         duration,
-        playbackRate: typeof data.playbackRate === "number" && Number.isFinite(data.playbackRate) && data.playbackRate > 0 && data.playbackRate <= 16 ? data.playbackRate : 1,
+        playbackRate,
         receivedAt: now,
         buttons
     };

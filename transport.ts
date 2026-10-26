@@ -16,6 +16,19 @@ export function normalizeServerUrl(value: string): string {
     return url.href.replace(/\/+$/, "");
 }
 
+export class MapleRequestError extends Error {
+    constructor(readonly status: number, readonly code?: string) {
+        super(`Maple request failed (HTTP ${status}).`);
+    }
+}
+
+function errorCode(body: string): string | undefined {
+    try {
+        const data: unknown = JSON.parse(body);
+        if (data && typeof data === "object" && "code" in data && typeof data.code === "string" && /^[A-Z_]{1,64}$/.test(data.code)) return data.code;
+    } catch { return; }
+}
+
 export async function request(url: string, init: RequestInit, signal: AbortSignal, timeoutMs = 15000): Promise<string> {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -30,9 +43,8 @@ export async function request(url: string, init: RequestInit, signal: AbortSigna
             cache: "no-store",
             signal: controller.signal
         });
-        if (!response.ok) throw new Error(`Maple request failed (HTTP ${response.status}).`);
         // Limit streamed bodies too, rather than checking only after response.text().
-        if (!response.body) throw new Error("Empty Maple response.");
+        if (!response.body) throw response.ok ? new Error("Empty Maple response.") : new MapleRequestError(response.status);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let bytes = 0;
@@ -48,7 +60,9 @@ export async function request(url: string, init: RequestInit, signal: AbortSigna
                 }
                 body += decoder.decode(value, { stream: true });
             }
-            return body + decoder.decode();
+            body += decoder.decode();
+            if (!response.ok) throw new MapleRequestError(response.status, errorCode(body));
+            return body;
         } finally {
             reader.releaseLock();
         }
@@ -75,7 +89,6 @@ class AuthenticationError extends Error { }
 
 interface Callbacks {
     onUpdate(data: unknown): void;
-    onArtwork(data: unknown): void;
     onDisconnect(): void;
     onStatus(status: string): void;
 }
@@ -177,7 +190,6 @@ export class MapleConnection {
                     const event: unknown = JSON.parse(match[1]);
                     if (!Array.isArray(event) || typeof event[0] !== "string") throw new Error("Invalid Socket.IO event.");
                     if (event[0] === "rpcUpdate") this.callbacks.onUpdate(event[1]);
-                    else if (event[0] === "albumArtUploaded") this.callbacks.onArtwork(event[1]);
                 } else if (packet !== "6" && !packet.startsWith("4")) {
                     throw new Error("Unsupported Engine.IO packet.");
                 }
