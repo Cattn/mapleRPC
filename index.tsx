@@ -10,9 +10,10 @@ import definePlugin, { OptionType } from "@utils/types";
 import { ApplicationAssetUtils, FluxDispatcher, Forms, React, TextInput, useEffect, useState } from "@webpack/common";
 
 import { MAPLE_URL, parsePlayback, Playback, playbackExpiry, playbackTimestamps } from "./playback";
-import { MapleConnection, normalizeServerUrl, request } from "./transport";
+import { MapleConnection, MapleRequestError, normalizeServerUrl, request } from "./transport";
 
 const applicationId = "1360456499263963156";
+const artworkWaitMs = 30000;
 
 interface Activity {
     application_id: string;
@@ -40,7 +41,7 @@ let artworkDeadline = 0;
 let artworkTrack: string | undefined;
 let defaultArtwork: Promise<string | undefined> | undefined;
 let currentPlayback: Playback | null = null;
-let artwork: { key: string; url: string; assetId?: string; asset?: Promise<string | undefined>; } | undefined;
+let artwork: { track: string; url: string; previous?: string; assetId?: string; asset?: Promise<string | undefined>; } | undefined;
 let status = "Disconnected.";
 const statusListeners = new Set<(status: string) => void>();
 
@@ -61,7 +62,6 @@ function clearPlayback(): void {
     artworkTrack = undefined;
     artworkDeadline = 0;
     currentPlayback = null;
-    artwork = undefined;
     setActivity(null);
 }
 
@@ -71,6 +71,7 @@ function disconnect(): void {
     loginController = undefined;
     connection?.stop();
     connection = undefined;
+    artwork = undefined;
     clearPlayback();
     setStatus("Disconnected.");
 }
@@ -81,6 +82,15 @@ async function ensureConnectSrcAllowed(serverUrl: string): Promise<void> {
     if (await VencordNative.csp.isDomainAllowed(origin, ["connect-src"])) return;
     const result = await VencordNative.csp.requestAddOverride(origin, ["connect-src"], "MapleRPC");
     throw new Error(result === "ok" ? "Restart Discord to apply Maple's connection permission, then sign in." : "Maple's connection permission was not granted.");
+}
+
+function signInError(error: unknown): Error {
+    if (!(error instanceof MapleRequestError)) return error instanceof Error ? error : new Error("Maple sign-in failed.");
+    if (error.code === "LEGACY_ENROLLMENT_REQUIRED") return new Error("Finish moving your account on the Maple website by adding and verifying an email address, then sign in here.");
+    if (error.code === "EMAIL_NOT_VERIFIED") return new Error("Verify your email address with the link Maple sent you, then sign in here.");
+    if (error.status === 401) return new Error("Incorrect Maple username, email, or password.");
+    if (error.status === 429) return new Error("Too many Maple sign-in attempts. Try again later.");
+    return new Error("Maple sign-in failed.");
 }
 
 async function connect(password?: string, username?: string): Promise<void> {
@@ -97,14 +107,15 @@ async function connect(password?: string, username?: string): Promise<void> {
         await ensureConnectSrcAllowed(serverUrl);
         if (!running || attempt !== generation) return;
         if (password !== undefined) {
-            if (!username?.trim() || !password) throw new Error("Enter your Maple username and password.");
+            const login = username?.trim();
+            if (!login || !password) throw new Error("Enter your Maple username or email and password.");
             setStatus("Signing in to Maple…");
-            const body = await request(`${serverUrl}/login`, {
+            const method = login.includes("@") ? "email" : "username";
+            await request(`${serverUrl}/api/auth/sign-in/${method}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username: username.trim(), password })
-            }, controller.signal);
-            if (JSON.parse(body)?.status !== "Success") throw new Error("Maple sign-in failed.");
+                body: JSON.stringify({ [method]: login, password })
+            }, controller.signal).catch(error => { throw signInError(error); });
         }
         if (!running || attempt !== generation) return;
         connection = new MapleConnection(serverUrl, {
@@ -118,16 +129,6 @@ async function connect(password?: string, username?: string): Promise<void> {
                 }
                 currentPlayback = playback;
                 setStatus("Connected. Receiving playback.");
-                void updatePresence();
-            },
-            onArtwork(value) {
-                if (!running || generation !== attempt || !currentPlayback || !value || typeof value !== "object") return;
-                const event = value as { id?: unknown; artworkRequestId?: unknown; };
-                if (event.id !== currentPlayback.id || event.artworkRequestId !== currentPlayback.artworkRequestId) return;
-                if (currentPlayback.artworkRequestId && currentPlayback.artworkReady) return;
-                currentPlayback = { ...currentPlayback, artworkReady: true };
-                // Legacy upload notifications refresh an already-resolved per-account image.
-                if (!currentPlayback.artworkRequestId) artwork = undefined;
                 void updatePresence();
             },
             onDisconnect() {
@@ -170,7 +171,7 @@ function SessionSettings() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <Forms.FormText>{message}</Forms.FormText>
             <Forms.FormText>Save changes to the server URL before signing in. Passwords are used for this sign-in only; Maple's session cookie is reused on startup.</Forms.FormText>
-            <TextInput placeholder="Maple username" value={username} onChange={setUsername} disabled={busy} />
+            <TextInput placeholder="Maple username or email" value={username} onChange={setUsername} disabled={busy} />
             <TextInput type="password" placeholder="Maple password" value={password} onChange={setPassword} disabled={busy} />
             <div style={{ display: "flex", gap: 8 }}>
                 <Button disabled={busy || !username.trim() || !password} onClick={() => void signIn()}>Sign in</Button>
@@ -267,52 +268,46 @@ async function updatePresence(): Promise<void> {
         activity.buttons = buttons.map(button => button.label);
         activity.metadata = { button_urls: buttons.map(button => button.url) };
     }
-    const track = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album, playback.artworkRequestId]);
-    const deadline = Date.now() + playback.artworkWait * 1000;
-    artworkDeadline = artworkTrack === track ? Math.min(artworkDeadline, deadline) : deadline;
-    artworkTrack = track;
-    const key = track;
-    if (artwork?.key !== key) {
+    const track = JSON.stringify([settings.store.serverUrl, playback.id, playback.title, playback.artist, playback.album]);
+    if (artworkTrack !== track) {
         setActivity(null);
-        artwork = {
-            key,
-            url: playback.id
-                ? `${normalizeServerUrl(settings.store.serverUrl)}/public/get/albumArt/${encodeURIComponent(playback.id)}`
-                : ""
-        };
+        artworkTrack = track;
+        artworkDeadline = Date.now() + artworkWaitMs;
+    }
+    const url = playback.largeImageKey === "maple" ? undefined : playback.largeImageKey;
+    if (artwork?.url !== url) {
+        artwork = url ? { track, url, previous: artwork?.track === track ? artwork.assetId ?? artwork.previous : undefined } : undefined;
     }
     const cover = artwork;
     const isCurrent = () => running && revision === renderRevision && currentPlayback === playback && Date.now() < expiresAt;
     const showArtwork = (asset: string) => {
         clearTimeout(artworkFallbackTimer);
-        activity.assets = { large_image: asset, large_text: playback.album || playback.title };
+        activity.assets = { large_image: asset, large_text: playback.largeImageText || playback.title };
         setActivity(activity);
         setStatus("Connected. Receiving playback.");
     };
     // Progress/settings updates must reuse a resolved cover before considering fallback.
-    if (cover.assetId) {
+    if (cover?.assetId) {
         showArtwork(cover.assetId);
         return;
     }
     const showFallback = () => {
-        if (!isCurrent() || cover.assetId) return;
+        if (!isCurrent() || cover?.assetId) return;
         setActivity(activity);
         setStatus("Connected. Artwork unavailable; showing playback.");
         defaultArtwork ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, ["maple"]))
             .then(ids => ids[0] as string | undefined).catch(() => undefined);
         void defaultArtwork.then(asset => {
-            if (!asset || !isCurrent() || cover.assetId) return;
-            activity.assets = { large_image: asset, large_text: playback.album || playback.title };
+            if (!asset || !isCurrent() || cover?.assetId) return;
+            activity.assets = { large_image: asset, large_text: playback.largeImageText || playback.title };
             setActivity(activity);
         });
     };
-    if (Date.now() >= artworkDeadline) showFallback();
+    if (cover?.previous) showArtwork(cover.previous);
+    else if (Date.now() >= artworkDeadline) showFallback();
     else artworkFallbackTimer = setTimeout(showFallback, artworkDeadline - Date.now());
-    // Updated clients explicitly wait for upload completion; legacy clients omit this flag.
-    if (!playback.id || playback.artworkReady === false) return;
-    // Keep the legacy random path segment and retry without caching failed lookups.
-    const imageUrl = `${cover.url}/${crypto.randomUUID()}`;
-    cover.asset ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, [imageUrl]))
+    if (!cover) return;
+    cover.asset ??= Promise.resolve().then(() => ApplicationAssetUtils.fetchAssetIds(applicationId, [cover.url]))
         .then(ids => ids[0] as string | undefined)
         .catch(() => undefined)
         .then(asset => {
@@ -323,9 +318,10 @@ async function updatePresence(): Promise<void> {
     const asset = await cover.asset;
     if (!isCurrent()) return;
     if (!asset) {
-        if (Date.now() >= artworkDeadline) showFallback();
-        else setStatus("Connected. Waiting for album artwork.");
-        artworkRetryTimer = setTimeout(() => { void updatePresence(); }, 5000);
+        if (Date.now() < artworkDeadline) {
+            setStatus("Connected. Waiting for album artwork.");
+            artworkRetryTimer = setTimeout(() => { void updatePresence(); }, 5000);
+        } else if (!cover.previous) showFallback();
         return;
     }
     showArtwork(asset);
